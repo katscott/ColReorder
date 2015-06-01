@@ -340,6 +340,57 @@ $.fn.dataTableExt.oApi.fnColReorder = function ( oSettings, iFrom, iTo )
 
 
 /**
+ * Plug-in for DataTables which will resize a column.
+ *  @method  $.fn.dataTableExt.oApi.fnColResize
+ *  @param   object oSettings DataTables settings object - automatically added by DataTables!
+ *  @param   int index The index of the column to be resized
+ *  @param   int newWidth The new width of the column
+ *  @returns void
+ */
+$.fn.dataTableExt.oApi.fnColResize = function (oSettings, index, newWidth) {
+
+	var iCols = oSettings.aoColumns.length;
+
+	if (index < 0 || index >= iCols) {
+		this.oApi._fnLog(oSettings, 1, "ColResize index is out of bounds: " + index);
+		return;
+	}
+
+	var nTh = oSettings.aoColumns[index].nTh;
+	var scrollXEnabled = oSettings.oInit.sScrollX === "" ? false : true;
+
+	var moveLength = newWidth - nTh.width;
+
+	nTh.width = newWidth;
+	$(nTh).width(newWidth);
+
+	if (scrollXEnabled) {
+		var scrollBody = $('div.dataTables_scrollBody', oSettings.nTableWrapper)[0];
+
+		var tableSize = -1;
+		//Keep the current table's width (used in case sScrollX is enabled to resize the whole table, giving an Excel-like behavior)
+		if (scrollBody != undefined) {
+				tableSize = $(scrollBody.childNodes[0].childNodes[0]).width();
+		}
+
+    var dataColumnIndex = $(nTh).attr("data-column-index");
+
+		$(scrollBody).find("th[data-column-index='"+dataColumnIndex+"']").width(newWidth);
+
+		//resize the tables
+		$('div.dataTables_scrollHeadInner, div.dataTables_scrollBody table, div.dataTables_scrollHead table')
+		    .width(tableSize + moveLength);
+	}
+
+	/* Fire an event so other plug-ins can update */
+	$(oSettings.oInstance).trigger('column-resize', [oSettings, {
+		"index": index,
+		"newWidth": newWidth
+	}]);
+};
+
+
+/**
  * ColReorder provides column visibility control for DataTables
  * @class ColReorder
  * @constructor
@@ -419,6 +470,14 @@ var ColReorder = function( dt, opts )
 		"init": $.extend( true, {}, ColReorder.defaults, opts ),
 
 		/**
+			 * Allow Resize functionnality
+			 *  @property allowResize
+			 *  @type     boolean
+			 *  @default  true
+			 */
+		"allowResize": true,
+
+		/**
 		 * Number of columns to fix (not allow to be reordered)
 		 *  @property fixed
 		 *  @type     int
@@ -479,6 +538,14 @@ var ColReorder = function( dt, opts )
 		 *  @default  null
 		 */
 		"drag": null,
+
+		/**
+		 * Resizing a column
+		 *  @property drag
+		 *  @type     element
+		 *  @default  null
+		 */
+		"resize": null,
 
 		/**
 		 * The insert cursor
@@ -619,6 +686,22 @@ ColReorder.prototype = {
 		var iLen = this.s.dt.aoColumns.length;
 		var i;
 
+		/* allow resize */
+		if (typeof this.s.init.allowResize != 'undefined') {
+			this.s.allowResize = this.s.init.allowResize;
+		}
+
+		if (this.s.allowResize) {
+			var scrollXEnabled;
+			scrollXEnabled = this.s.dt.oInit.sScrollX === "" ? false : true;
+			if (scrollXEnabled) {
+				$(this.s.dt.nScrollHead).find("table").addClass("table-resizable");
+				$(this.s.dt.nScrollBody).find("table").addClass("table-resizable");
+			} else {
+				$(this.s.dt.nTable).addClass("table-resizable");
+			}
+		}
+
 		/* Columns discounted from reordering - counting left to right */
 		if ( this.s.init.iFixedColumns )
 		{
@@ -667,8 +750,16 @@ ColReorder.prototype = {
 			aiOrder = this.s.dt.oLoadedState.ColReorder;
 		}
 
-		/* If we have an order to apply - do so */
-		if ( aiOrder )
+		var aiSizing = null;
+		/* State loading, overrides the column sizes given */
+		if (this.s.dt.oLoadedState && typeof this.s.dt.oLoadedState.ColResize != 'undefined' &&
+		  this.s.dt.oLoadedState.ColResize.length == this.s.dt.aoColumns.length) {
+			aiSizing = this.s.dt.oLoadedState.ColResize;
+		}
+
+
+		/* If we have an order or sizing to apply - do so */
+		if ( aiOrder || aiSizing)
 		{
 			/* We might be called during or after the DataTables initialisation. If before, then we need
 			 * to wait until the draw is done, if after, then do what we need to do right away
@@ -681,8 +772,13 @@ ColReorder.prototype = {
 						if ( !that.s.dt._bInitComplete && !bDone )
 						{
 							bDone = true;
-							var resort = fnInvertKeyValues( aiOrder );
-							that._fnOrderColumns.call( that, resort );
+							if (aiOrder) {
+								var resort = fnInvertKeyValues(aiOrder);
+								that._fnOrderColumns.call(that, resort);
+							}
+							if (aiSizing) {
+								that._fnResizeColumns.call(that, aiSizing);
+							}
 						}
 					},
 					"sName": "ColReorder_Pre"
@@ -690,8 +786,13 @@ ColReorder.prototype = {
 			}
 			else
 			{
-				var resort = fnInvertKeyValues( aiOrder );
-				that._fnOrderColumns.call( that, resort );
+				if (aiOrder) {
+					var resort = fnInvertKeyValues(aiOrder);
+					that._fnOrderColumns.call(that, resort);
+				}
+				if (aiSizing) {
+					that._fnResizeColumns.call(that, aiSizing);
+				}
 			}
 		}
 		else {
@@ -739,11 +840,46 @@ ColReorder.prototype = {
 		this.s.dt.oInstance.oApi._fnSaveState( this.s.dt );
 
 		this._fnSetColumnIndexes();
-		
+
 		if ( this.s.reorderCallback !== null )
 		{
 			this.s.reorderCallback.call( this );
 		}
+	},
+
+
+	/**
+	 * Set the column widths from an array
+	 *  @method  _fnOrderColumns
+	 *  @param   array a An array of integers which dictate the column order that should be applied
+	 *  @returns void
+	 *  @private
+	 */
+	"_fnResizeColumns": function ( a )
+	{
+		if ( a.length != this.s.dt.aoColumns.length )
+		{
+			this.s.dt.oInstance.oApi._fnLog( this.s.dt, 1, "ColReorder - array reorder does not "+
+				"match known number of columns. Skipping." );
+			return;
+		}
+
+		for ( var i=0, iLen=a.length ; i<iLen ; i++ )
+		{
+			/* Do the column resize in the table */
+			this.s.dt.oInstance.fnColResize( i, a[i] );
+		}
+
+		/* When scrolling we need to recalculate the column sizes to allow for the shift */
+		if ( this.s.dt.oScroll.sX !== "" || this.s.dt.oScroll.sY !== "" )
+		{
+			this.s.dt.oInstance.fnAdjustColumnSizing();
+		}
+
+		/* Save the state */
+		this.s.dt.oInstance.oApi._fnSaveState( this.s.dt );
+
+		this._fnSetColumnIndexes();
 	},
 
 
@@ -806,6 +942,14 @@ ColReorder.prototype = {
 				oState.ColReorder.push( iOrigColumn );
 			}
 		}
+
+		if (this.s.allowResize) {
+			oState.ColResize = [];
+			for (i = 0, iLen = columns.length; i < iLen; i++) {
+				/* Column sizes */
+				oState.ColResize.push(parseFloat(columns[i].sWidth));
+			}
+		}
 	},
 
 
@@ -824,6 +968,31 @@ ColReorder.prototype = {
 	"_fnMouseListener": function ( i, nTh )
 	{
 		var that = this;
+
+		//Martin Marchetta (rebind events since after column re-order they use wrong column indices)
+		$(nTh).unbind('mousemove.ColReorder');
+		$(nTh).unbind('mousedown.ColReorder');
+		////////////////
+
+		// listen to mousemove event for resize
+		if (this.s.allowResize) {
+			$(nTh).bind('mousemove.ColReorder', function (e) {
+				if (that.dom.drag === null && that.dom.resize === null) {
+					/* Store information about the mouse position */
+					var nThTarget = e.target.nodeName == "TH" ? e.target : $(e.target).parents('TH')[0];
+					var offset = $(nThTarget).offset();
+					var nLength = $(nThTarget).innerWidth();
+
+					/* are we on the col border (if so, resize col) */
+					if (Math.abs(e.pageX - Math.round(offset.left + nLength)) <= 5) {
+						$(nThTarget).css({ 'cursor': 'col-resize' });
+					}
+					else
+						$(nThTarget).css({ 'cursor': 'pointer' });
+				}
+			});
+		}
+
 		$(nTh).on( 'mousedown.ColReorder', function (e) {
 			e.preventDefault();
 			that._fnMouseDown.call( that, e, nTh );
@@ -860,7 +1029,28 @@ ColReorder.prototype = {
 		this.s.mouse.targetIndex = idx;
 		this.s.mouse.fromIndex = idx;
 
-		this._fnRegions();
+		/* are we resizing a column ? */
+		if ($(nTh).css('cursor') == 'col-resize') {
+
+			this.s.mouse.startX = e.pageX;
+			this.s.mouse.startWidth = $(nTh).width();
+			this.s.mouse.resizeElem = $(nTh);
+			var nThNext = $(nTh).next();
+			this.s.mouse.nextStartWidth = $(nThNext).width();
+			that.dom.resize = true;
+			////////////////////
+			//Martin Marchetta
+			//a. Disable column sorting so as to avoid issues when finishing column resizing
+			this.s.dt.aoColumns[idx].bSortable = false;
+			//b. Disable Autowidth feature (now the user is in charge of setting column width so keeping this enabled looses changes after operations)
+			this.s.dt.oFeatures.bAutoWidth = false;
+			////////////////////
+
+		} else {
+
+			this._fnRegions();
+
+		}
 
 		/* Add event handlers to the document */
 		$(document)
@@ -884,55 +1074,76 @@ ColReorder.prototype = {
 	{
 		var that = this;
 
-		if ( this.dom.drag === null )
-		{
-			/* Only create the drag element if the mouse has moved a specific distance from the start
-			 * point - this allows the user to make small mouse movements when sorting and not have a
-			 * possibly confusing drag element showing up
-			 */
-			if ( Math.pow(
-				Math.pow(e.pageX - this.s.mouse.startX, 2) +
-				Math.pow(e.pageY - this.s.mouse.startY, 2), 0.5 ) < 5 )
+		////////////////////
+		//Martin Marchetta: Determine if ScrollX is enabled
+		var scrollXEnabled = this.s.dt.oInit.sScrollX === "" ? false : true;
+		////////////////////
+
+		/* are we resizing a column ? */
+		if (this.dom.resize) {
+			var nTh = this.s.mouse.resizeElem;
+			var colIndex = nTh.attr('data-column-index')
+			var nThNext = $(nTh).next();
+			var moveLength = e.pageX - this.s.mouse.startX;
+
+			if (moveLength != 0 && !scrollXEnabled)
+				$(nThNext).width(this.s.mouse.nextStartWidth - moveLength);
+
+			var newWidth = this.s.mouse.startWidth + moveLength;
+			this.s.dt.oInstance.fnColResize( colIndex, newWidth );
+
+			return;
+		} else {
+			if ( this.dom.drag === null )
 			{
-				return;
+				/* Only create the drag element if the mouse has moved a specific distance from the start
+				 * point - this allows the user to make small mouse movements when sorting and not have a
+				 * possibly confusing drag element showing up
+				 */
+				if ( Math.pow(
+					Math.pow(e.pageX - this.s.mouse.startX, 2) +
+					Math.pow(e.pageY - this.s.mouse.startY, 2), 0.5 ) < 5 )
+				{
+					return;
+				}
+				this._fnCreateDragNode();
 			}
-			this._fnCreateDragNode();
-		}
 
-		/* Position the element - we respect where in the element the click occured */
-		this.dom.drag.css( {
-			left: e.pageX - this.s.mouse.offsetX,
-			top: e.pageY - this.s.mouse.offsetY
-		} );
+			/* Position the element - we respect where in the element the click occured */
+			this.dom.drag.css( {
+				left: e.pageX - this.s.mouse.offsetX,
+				top: e.pageY - this.s.mouse.offsetY
+			} );
 
-		/* Based on the current mouse position, calculate where the insert should go */
-		var bSet = false;
-		var lastToIndex = this.s.mouse.toIndex;
+			/* Based on the current mouse position, calculate where the insert should go */
+			var bSet = false;
+			var lastToIndex = this.s.mouse.toIndex;
 
-		for ( var i=1, iLen=this.s.aoTargets.length ; i<iLen ; i++ )
-		{
-			if ( e.pageX < this.s.aoTargets[i-1].x + ((this.s.aoTargets[i].x-this.s.aoTargets[i-1].x)/2) )
+			for ( var i=1, iLen=this.s.aoTargets.length ; i<iLen ; i++ )
 			{
-				this.dom.pointer.css( 'left', this.s.aoTargets[i-1].x );
-				this.s.mouse.toIndex = this.s.aoTargets[i-1].to;
-				bSet = true;
-				break;
+				if ( e.pageX < this.s.aoTargets[i-1].x + ((this.s.aoTargets[i].x-this.s.aoTargets[i-1].x)/2) )
+				{
+					this.dom.pointer.css( 'left', this.s.aoTargets[i-1].x );
+					this.s.mouse.toIndex = this.s.aoTargets[i-1].to;
+					bSet = true;
+					break;
+				}
 			}
-		}
 
-		// The insert element wasn't positioned in the array (less than
-		// operator), so we put it at the end
-		if ( !bSet )
-		{
-			this.dom.pointer.css( 'left', this.s.aoTargets[this.s.aoTargets.length-1].x );
-			this.s.mouse.toIndex = this.s.aoTargets[this.s.aoTargets.length-1].to;
-		}
+			// The insert element wasn't positioned in the array (less than
+			// operator), so we put it at the end
+			if ( !bSet )
+			{
+				this.dom.pointer.css( 'left', this.s.aoTargets[this.s.aoTargets.length-1].x );
+				this.s.mouse.toIndex = this.s.aoTargets[this.s.aoTargets.length-1].to;
+			}
 
-		// Perform reordering if realtime updating is on and the column has moved
-		if ( this.s.init.bRealtime && lastToIndex !== this.s.mouse.toIndex ) {
-			this.s.dt.oInstance.fnColReorder( this.s.mouse.fromIndex, this.s.mouse.toIndex );
-			this.s.mouse.fromIndex = this.s.mouse.toIndex;
-			this._fnRegions();
+			// Perform reordering if realtime updating is on and the column has moved
+			if ( this.s.init.bRealtime && lastToIndex !== this.s.mouse.toIndex ) {
+				this.s.dt.oInstance.fnColReorder( this.s.mouse.fromIndex, this.s.mouse.toIndex );
+				this.s.mouse.fromIndex = this.s.mouse.toIndex;
+				this._fnRegions();
+			}
 		}
 	},
 
@@ -976,6 +1187,62 @@ ColReorder.prototype = {
 				this.s.reorderCallback.call( this );
 			}
 		}
+		///////////////////////////////////////////////////////
+			//Martin Marchetta
+		else if (this.dom.resize !== null) {
+			var i;
+			var j;
+			var currentColumn;
+			var nextVisibleColumnIndex;
+			var previousVisibleColumnIndex;
+			var scrollXEnabled;
+			var colResized = this.s.mouse.fromIndex;
+
+			//Re-enable column sorting
+			this.s.dt.aoColumns[colResized].bSortable = true;
+
+			//Save the new resized column's width
+			this.s.dt.aoColumns[colResized].sWidth = $(this.s.mouse.resizeElem).innerWidth() + "px";
+
+			//If other columns might have changed their size, save their size too
+			scrollXEnabled = this.s.dt.oInit.sScrollX === "" ? false : true;
+			if (!scrollXEnabled) {
+				//The colResized index (internal model) here might not match the visible index since some columns might have been hidden
+				for (nextVisibleColumnIndex = colResized + 1; nextVisibleColumnIndex < this.s.dt.aoColumns.length; nextVisibleColumnIndex++) {
+					if (this.s.dt.aoColumns[nextVisibleColumnIndex].bVisible)
+						break;
+				}
+
+				for (previousVisibleColumnIndex = colResized - 1; previousVisibleColumnIndex >= 0; previousVisibleColumnIndex--) {
+					if (this.s.dt.aoColumns[previousVisibleColumnIndex].bVisible)
+						break;
+				}
+
+				if (this.s.dt.aoColumns.length > nextVisibleColumnIndex)
+					this.s.dt.aoColumns[nextVisibleColumnIndex].sWidth = $(this.s.mouse.resizeElem).next().innerWidth() + "px";
+				else { //The column resized is the right-most, so save the sizes of all the columns at the left
+					currentColumn = this.s.mouse.resizeElem;
+					for (i = previousVisibleColumnIndex; i > 0; i--) {
+						if (this.s.dt.aoColumns[i].bVisible) {
+							currentColumn = $(currentColumn).prev();
+							this.s.dt.aoColumns[i].sWidth = $(currentColumn).innerWidth() + "px";
+						}
+					}
+				}
+			}
+
+			//Update the internal storage of the table's width (in case we changed it because the user resized some column and scrollX was enabled
+			if (scrollXEnabled && $('div.dataTables_scrollHead', this.s.dt.nTableWrapper) != undefined) {
+				if ($('div.dataTables_scrollHead', this.s.dt.nTableWrapper).length > 0)
+					this.s.table_size = $($('div.dataTables_scrollHead', this.s.dt.nTableWrapper)[0].childNodes[0].childNodes[0]).width();
+			}
+
+			//Save the state
+			this.s.dt.oInstance.oApi._fnSaveState(this.s.dt);
+		}
+		///////////////////////////////////////////////////////
+
+		this.dom.resize = null;
 	},
 
 
